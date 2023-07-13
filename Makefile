@@ -153,10 +153,7 @@ UPROGS=\
 	$U/_primes\
 	$U/_find\
 	$U/_xargs\
-	$U/_uptime\
 	$U/_sleep\
-	$U/_dog\
-	$U/_wait\
 
 
 
