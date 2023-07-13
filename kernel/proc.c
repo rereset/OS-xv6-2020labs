@@ -295,6 +295,9 @@ fork(void)
 
   np->state = RUNNABLE;
 
+  /* 子进程复制父进程pid */
+  np->mask = p->mask;
+
   release(&np->lock);
 
   return pid;
@@ -692,4 +695,20 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+/* 获取当前进程状态为unused的进程数量 */
+uint64 nproc(void)
+{
+  uint64 cnt=0;  // 计数
+  struct proc *p;  // 指针遍历所有进程
+  // Return the number of processes whose state is not UNUSED
+  for (p = proc; p < &proc[NPROC]; p++)
+  {
+    acquire(&p->lock);  // 进程加锁
+    if (p->state != UNUSED)
+      cnt++;
+    release(&p->lock);  // 释放锁
+  }
+  return cnt;
 }

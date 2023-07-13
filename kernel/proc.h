@@ -93,6 +93,7 @@ struct proc {
   int killed;                  // If non-zero, have been killed
   int xstate;                  // Exit status to be returned to parent's wait
   int pid;                     // Process ID
+  int mask;                    // 掩码
 
   // these are private to the process, so p->lock need not be held.
   uint64 kstack;               // Virtual address of kernel stack
@@ -104,3 +105,12 @@ struct proc {
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
 };
+
+/* 打印系统调用名字使用 */
+static char *syscall_names[] = {
+  "", "fork", "exit", "wait", "pipe", 
+  "read", "kill", "exec", "fstat", "chdir", 
+  "dup", "getpid", "sbrk", "sleep", "uptime", 
+  "open", "write", "mknod", "unlink", "link", 
+  "mkdir", "close", "trace","sysinfo"};
+

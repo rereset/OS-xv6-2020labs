@@ -6,6 +6,7 @@
 #include "memlayout.h"
 #include "spinlock.h"
 #include "proc.h"
+#include "sysinfo.h"
 
 uint64
 sys_exit(void)
@@ -95,3 +96,37 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+/* sys_trace具体实现 */
+uint64
+sys_trace(void)
+{
+  int mask;
+  /* 观察前文传入参数，取寄存器0中值返回mask */
+  if(argint(0, &mask) < 0)
+    return -1;
+  myproc()->mask = mask;
+  return 0;
+}
+
+/* sys_sysinfo具体实现 */
+// add header
+uint64
+sys_sysinfo(void)
+{
+  uint64 user_addr;  // 用户空间的虚拟地址
+  struct sysinfo info;
+  struct proc *p = myproc();  // 正在处理的进程
+  
+  if (argaddr(0, &user_addr) < 0)  // 读取保存的用户地址
+	  return -1;
+
+  /* 获取对应信息 */
+  info.freemem = free_mem();
+  info.nproc = nproc();
+
+  if (copyout(p->pagetable, user_addr, (char *)&info, sizeof(info)) < 0)
+    return -1;
+  return 0;
+}
+
