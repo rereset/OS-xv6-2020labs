@@ -16,6 +16,7 @@
 #include "fs.h"
 #include "buf.h"
 #include "virtio.h"
+#include "proc.h"
 
 // the address of virtio mmio register r.
 #define R(r) ((volatile uint32 *)(VIRTIO0 + (r)))
@@ -175,9 +176,9 @@ virtio_disk_rw(struct buf *b, int write)
   // the spec says that legacy block operations use three
   // descriptors: one for type/reserved/sector, one for
   // the data, one for a 1-byte status result.
-
   // allocate the three descriptors.
   int idx[3];
+  
   while(1){
     if(alloc3_desc(idx) == 0) {
       break;
@@ -203,7 +204,8 @@ virtio_disk_rw(struct buf *b, int write)
 
   // buf0 is on a kernel stack, which is not direct mapped,
   // thus the call to kvmpa().
-  disk.desc[idx[0]].addr = (uint64) kvmpa((uint64) &buf0);
+
+  disk.desc[idx[0]].addr = (uint64) kvmpa(myproc()->kernel_ownpgtbl, (uint64) &buf0);  // 获取内核页表
   disk.desc[idx[0]].len = sizeof(buf0);
   disk.desc[idx[0]].flags = VRING_DESC_F_NEXT;
   disk.desc[idx[0]].next = idx[1];
