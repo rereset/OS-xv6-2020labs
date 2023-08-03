@@ -113,6 +113,20 @@ found:
     return 0;
   }
 
+  
+  // 分配内存以存储进程的闹钟中断帧，即 trapframe 结构体
+  if ((p->alarm_trapframe = (struct trapframe *)kalloc()) == 0) {
+      // 分配内存失败时，释放进程锁并返回 0
+      release(&p->lock);
+      return 0;
+  }
+
+  // 初始化进程的闹钟相关属性
+  p->alarm_interval = 0;        // 闹钟触发的时间间隔（滴答数）
+  p->alarm_handler = 0;         // 闹钟信号的处理函数指针
+  p->alarm_ticks = 0;           // 闹钟剩余滴答数
+  p->alarm_goingoff = 0;        // 表示闹钟是否正在触发中
+
   // An empty user page table.
   p->pagetable = proc_pagetable(p);
   if(p->pagetable == 0){
@@ -139,8 +153,14 @@ freeproc(struct proc *p)
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
+
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
+  
+  if(p->alarm_trapframe)  // 释放
+    kfree((void*)p->alarm_trapframe);
+  p->alarm_trapframe = 0;
+  
   p->pagetable = 0;
   p->sz = 0;
   p->pid = 0;
@@ -149,6 +169,12 @@ freeproc(struct proc *p)
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+  p->state = UNUSED;
+  
+  p->alarm_interval = 0;
+  p->alarm_handler = 0;
+  p->alarm_ticks = 0;
+  p->alarm_goingoff = 0;
   p->state = UNUSED;
 }
 

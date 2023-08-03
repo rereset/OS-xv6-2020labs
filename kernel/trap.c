@@ -77,9 +77,21 @@ usertrap(void)
     exit(-1);
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
+  if(which_dev == 2) {
+    if(p->alarm_interval != 0) { // 如果设定了时钟事件
+      if(--p->alarm_ticks <= 0) { // 时钟倒计时 -1 tick，如果已经到达或超过设定的 tick 数
+        if(!p->alarm_goingoff) { // 确保没有时钟正在运行
+          p->alarm_ticks = p->alarm_interval;
+          // jump to execute alarm_handler
+          *p->alarm_trapframe = *p->trapframe; // backup trapframe
+          p->trapframe->epc = (uint64)p->alarm_handler;
+          p->alarm_goingoff = 1;
+        }
+        // 如果一个时钟到期的时候已经有一个时钟处理函数正在运行，则会推迟到原处理函数运行完成后的下一个 tick 才触发这次时钟
+      }
+    }
     yield();
-
+  }
   usertrapret();
 }
 
@@ -217,4 +229,39 @@ devintr()
     return 0;
   }
 }
+
+
+// sigalarm - 设置进程的闹钟信号属性
+// 参数:
+// - ticks: 闹钟触发的时钟滴答数
+// - handler: 闹钟信号的处理函数指针
+// 返回值:
+// - 0: 成功
+int sigalarm(int ticks, void (*handler)()) {
+  // 获取当前进程的指针
+  struct proc *p = myproc();
+  
+  // 设置进程的闹钟属性
+  p->alarm_interval = ticks;      // 闹钟触发间隔
+  p->alarm_handler = handler;     // 闹钟信号处理函数
+  p->alarm_ticks = ticks;         // 闹钟滴答数
+  return 0;
+}
+
+// sigreturn - 恢复时钟中断之前的进程状态
+// 返回值:
+// - 0: 成功
+int sigreturn() {
+  // 获取当前进程的指针
+  struct proc *p = myproc();
+  
+  // 恢复 trapframe 到时钟中断之前的状态
+  // 这是为了回到原来的程序流
+  *p->trapframe = *p->alarm_trapframe;
+  
+  // 重置闹钟标志，表示闹钟已经触发完毕
+  p->alarm_goingoff = 0;
+  return 0;
+}
+
 
