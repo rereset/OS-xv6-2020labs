@@ -22,15 +22,25 @@ barrier_init(void)
   bstate.nthread = 0;
 }
 
+// 线程屏障函数
 static void 
-barrier()
+barrier() 
 {
-  // YOUR CODE HERE
-  //
-  // Block until all threads have called barrier() and
-  // then increment bstate.round.
-  //
-  
+  pthread_mutex_lock(&bstate.barrier_mutex);
+  // 如果当前参与的线程数还没有达到总线程数
+  if (++bstate.nthread < nthread) 
+  {
+    // 等待，直到所有线程都达到这里
+    pthread_cond_wait(&bstate.barrier_cond, &bstate.barrier_mutex);
+  }
+  else 
+  {
+    // 当所有线程都到达时，重置计数并增加轮数，然后广播唤醒所有线程
+    bstate.nthread = 0;
+    bstate.round++;
+    pthread_cond_broadcast(&bstate.barrier_cond);
+  }
+  pthread_mutex_unlock(&bstate.barrier_mutex);
 }
 
 static void *
