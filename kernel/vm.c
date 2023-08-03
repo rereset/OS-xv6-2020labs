@@ -5,6 +5,8 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "spinlock.h"
+#include "proc.h"
 
 /*
  * the kernel's page table.
@@ -181,9 +183,9 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
 
   for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
     if((pte = walk(pagetable, a, 0)) == 0)
-      panic("uvmunmap: walk");
+      continue;
     if((*pte & PTE_V) == 0)
-      panic("uvmunmap: not mapped");
+      continue;
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
     if(do_free){
@@ -315,9 +317,9 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
-      panic("uvmcopy: pte should exist");
+      continue;
     if((*pte & PTE_V) == 0)
-      panic("uvmcopy: page not present");
+      continue;
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
     if((mem = kalloc()) == 0)
@@ -356,6 +358,9 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
 
+    if(uvmshouldtouch(dstva))
+      uvmlazytouch(dstva);
+
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
     pa0 = walkaddr(pagetable, va0);
@@ -380,6 +385,9 @@ int
 copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
   uint64 n, va0, pa0;
+
+  if(uvmshouldtouch(srcva))
+    uvmlazytouch(srcva);
 
   while(len > 0){
     va0 = PGROUNDDOWN(srcva);
@@ -440,3 +448,36 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return -1;
   }
 }
+
+// kernel/vm.c
+
+// 在需要使用懒分配的虚拟内存页时，将其映射到实际的物理页。
+void uvmlazytouch(uint64 va) {
+  struct proc *p = myproc();
+  char *mem = kalloc();  // 分配一个物理内存页
+  if(mem == 0) {
+    // 分配物理内存失败
+    printf("lazy alloc: out of memory\n");
+    p->killed = 1;  // 标记进程为被终止状态
+  } else {
+    memset(mem, 0, PGSIZE);  // 初始化物理内存页
+    if(mappages(p->pagetable, PGROUNDDOWN(va), PGSIZE, (uint64)mem, PTE_W|PTE_X|PTE_R|PTE_U) != 0){
+      // 映射内存页失败
+      printf("lazy alloc: failed to map page\n");
+      kfree(mem);  // 释放刚刚分配的物理内存页
+      p->killed = 1;  // 标记进程为被终止状态
+    }
+  }
+}
+
+// 判断一个页面是否之前是通过懒分配方式分配的，需要在使用之前进行映射。
+int uvmshouldtouch(uint64 va) {
+  pte_t *pte;
+  struct proc *p = myproc();
+  
+  return va < p->sz // 在进程内存范围内
+    && PGROUNDDOWN(va) != r_sp() // 不是栈的保护页（不应该映射）
+    && (((pte = walk(p->pagetable, va, 0))==0) || ((*pte & PTE_V)==0)); // 页表项不存在
+}
+
+

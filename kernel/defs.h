@@ -171,6 +171,8 @@ uint64          walkaddr(pagetable_t, uint64);
 int             copyout(pagetable_t, uint64, char *, uint64);
 int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
+void            uvmlazytouch(uint64 va);  // 实际分配物理内存
+int             uvmshouldtouch(uint64 va);  // 检测是否需要被懒分配
 
 // plic.c
 void            plicinit(void);
