@@ -65,3 +65,8 @@
 //   TRAPFRAME (p->trapframe, used by the trampoline)
 //   TRAMPOLINE (the same page as in the kernel)
 #define TRAPFRAME (TRAMPOLINE - PGSIZE)
+
+// the minimum address the mmap can ues - lab10
+#define MMAPEND TRAPFRAME
+// MMAP 所能使用的最后一个页+1
+

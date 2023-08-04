@@ -14,7 +14,11 @@
 #include "fs.h"
 #include "sleeplock.h"
 #include "file.h"
+#include "memlayout.h"
 #include "fcntl.h"
+
+#define max(a, b) ((a) > (b) ? (a) : (b))   // lab10
+#define min(a, b) ((a) < (b) ? (a) : (b))   // lab10
 
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
@@ -484,3 +488,168 @@ sys_pipe(void)
   }
   return 0;
 }
+
+
+
+uint64 sys_mmap(void)
+{
+    uint64 addr, sz, offset;
+    int prot, flags, fd; struct file *f;
+
+    // 从用户空间获取参数：地址、大小、权限、标志、文件描述符、偏移量
+    if(argaddr(0, &addr) < 0 || argaddr(1, &sz) < 0 || argint(2, &prot) < 0
+        || argint(3, &flags) < 0 || argfd(4, &fd, &f) < 0 || argaddr(5, &offset) < 0 || sz == 0)
+        return -1;
+
+    // 检查文件权限以及映射权限是否匹配
+    if((!f->readable && (prot & (PROT_READ)))
+        || (!f->writable && (prot & PROT_WRITE) && !(flags & MAP_PRIVATE)))
+        return -1;
+
+    // 将映射大小向上对齐到页面大小的倍数
+    sz = PGROUNDUP(sz);
+
+    // 获取当前进程的 proc 结构体
+    struct proc *p = myproc();
+    struct vma *v = 0;
+    uint64 vaend = MMAPEND; // 非包含（non-inclusive）的结束虚拟地址
+
+    // 查找合适的虚拟内存区域（VMA），用于映射文件
+    // 实现中将文件映射在陷阱帧（trapframe）之下，从高地址向低地址映射
+    for(int i=0;i<NVMA;i++) {
+        struct vma *vv = &p->vmas[i];
+        if(vv->valid == 0) {
+            if(v == 0) {
+                v = &p->vmas[i];
+                // 找到可用的 VMA
+                v->valid = 1;
+            }
+        } else if(vv->vastart < vaend) {
+            // 更新 vaend，使其成为已有 VMA 的虚拟地址下限
+            vaend = PGROUNDDOWN(vv->vastart);
+        }
+    }
+
+    if(v == 0){
+        panic("mmap: no free vma");
+    }
+
+    // 设置 VMA 的属性
+    v->vastart = vaend - sz; // 分配虚拟地址的起始位置
+    v->sz = sz; // 映射大小
+    v->prot = prot; // 权限
+    v->flags = flags; // 标志
+    v->f = f; // 文件指针，假定 f->type == FD_INODE
+    v->offset = offset; // 文件偏移量
+
+    // 增加文件引用计数，以确保文件在映射期间不会被关闭
+    filedup(v->f);
+
+    // 返回映射的起始虚拟地址
+    return v->vastart;
+}
+
+
+// 在进程的 VMA 列表中查找包含指定虚拟地址的 VMA
+// 如果找到匹配的 VMA，返回该 VMA 的指针；否则返回 0
+struct vma *findvma(struct proc *p, uint64 va) {
+    for (int i = 0; i < NVMA; i++) {
+        struct vma *vv = &p->vmas[i]; // 获取当前索引对应的 VMA
+        if (vv->valid == 1 && va >= vv->vastart && va < vv->vastart + vv->sz) {
+            // 检查 VMA 是否有效，以及指定的虚拟地址是否在 VMA 的范围内
+            return vv; // 返回匹配的 VMA 指针
+        }
+    }
+    return 0; // 没有找到匹配的 VMA，返回 0
+}
+
+
+// 判断某个页面是否是之前进行了延迟分配（lazy-allocated），
+// 需要在使用之前进行访问（touch）。
+// 如果是，则访问该页面，将其映射到一个实际的物理页面，并包含映射文件的内容。
+// 如果是，则返回 1，否则返回 0。
+int vmatrylazytouch(uint64 va) {
+    struct proc *p = myproc(); // 获取当前进程的 proc 结构体
+    struct vma *v = findvma(p, va); // 查找包含虚拟地址的 VMA
+    if (v == 0) {
+        return 0; // 未找到匹配的 VMA，返回 0
+    }
+
+    // 分配一个物理页面
+    void *pa = kalloc();
+    if (pa == 0) {
+        panic("vmalazytouch: kalloc"); // 分配失败，触发 panic
+    }
+    memset(pa, 0, PGSIZE); // 初始化页面内容为 0
+
+    // 从磁盘读取数据到物理页面
+    begin_op();
+    ilock(v->f->ip);
+    readi(v->f->ip, 0, (uint64)pa, v->offset + PGROUNDDOWN(va - v->vastart), PGSIZE); // 从文件读取数据
+    iunlock(v->f->ip);
+    end_op();
+
+    // 设置适当的权限，然后映射物理页面到虚拟地址
+    int perm = PTE_U;
+    if (v->prot & PROT_READ)
+        perm |= PTE_R;
+    if (v->prot & PROT_WRITE)
+        perm |= PTE_W;
+    if (v->prot & PROT_EXEC)
+        perm |= PTE_X;
+
+    // 将物理页面映射到虚拟地址，设置相应的权限
+    if (mappages(p->pagetable, va, PGSIZE, (uint64)pa, perm) < 0) {
+        panic("vmalazytouch: mappages"); // 映射失败，触发 panic
+    }
+
+    return 1; // 返回 1 表示成功进行了页面访问和映射
+}
+
+
+// 取消映射一个范围内的内存页
+uint64 sys_munmap(void)
+{
+    uint64 addr, sz;
+
+    // 从用户空间获取参数：起始地址和大小
+    if (argaddr(0, &addr) < 0 || argaddr(1, &sz) < 0 || sz == 0)
+        return -1;
+
+    struct proc *p = myproc(); // 获取当前进程的 proc 结构体
+
+    struct vma *v = findvma(p, addr); // 查找包含指定虚拟地址的 VMA
+    if (v == 0) {
+        return -1; // 未找到匹配的 VMA，返回 -1
+    }
+
+    if (addr > v->vastart && addr + sz < v->vastart + v->sz) {
+        // 尝试在内存范围内创建“洞”
+        return -1;
+    }
+
+    uint64 addr_aligned = addr;
+    if (addr > v->vastart) {
+        addr_aligned = PGROUNDUP(addr); // 向上对齐地址
+    }
+
+    int nunmap = sz - (addr_aligned - addr); // 要取消映射的字节数
+    if (nunmap < 0)
+        nunmap = 0;
+
+    vmaunmap(p->pagetable, addr_aligned, nunmap, v); // 自定义内存页面取消映射函数，用于取消映射 mmapped 页面。
+
+    if (addr <= v->vastart && addr + sz > v->vastart) { // 在开头处取消映射
+        v->offset += addr + sz - v->vastart;
+        v->vastart = addr + sz;
+    }
+    v->sz -= sz; // 更新 VMA 的大小
+
+    if (v->sz <= 0) {
+        fileclose(v->f); // 关闭文件
+        v->valid = 0; // 将 VMA 标记为无效
+    }
+
+    return 0; // 成功取消映射，返回 0
+}
+
