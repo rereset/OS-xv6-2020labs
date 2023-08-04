@@ -376,14 +376,6 @@ iunlockput(struct inode *ip)
 // If there is no such block, bmap allocates one.
 // kernel/fs.c
 
-// 返回inode ip中第n个块的磁盘块地址。
-// 如果不存在这样的块，bmap会分配一个。
-// kernel/fs.c
-
-// Return the disk block address of the nth block in inode ip.
-// If there is no such block, bmap allocates one.
-// kernel/fs.c
-
 // Return the disk block address of the nth block in inode ip.
 // If there is no such block, bmap allocates one.
 static uint
@@ -490,9 +482,6 @@ itrunc(struct inode *ip)
   ip->size = 0;
   iupdate(ip);
 }
-
-
-
 
 
 // Copy stat information from inode.
