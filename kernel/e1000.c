@@ -92,30 +92,88 @@ e1000_init(uint32 *xregs)
   regs[E1000_IMS] = (1 << 7); // RXDW -- Receiver Descriptor Write Back
 }
 
-int
-e1000_transmit(struct mbuf *m)
+// 向 e1000 网卡发送一个以太网帧
+int e1000_transmit(struct mbuf *m)
 {
-  //
-  // Your code here.
-  //
-  // the mbuf contains an ethernet frame; program it into
-  // the TX descriptor ring so that the e1000 sends it. Stash
-  // a pointer so that it can be freed after sending.
-  //
-  
-  return 0;
+    uint32 tail;
+    struct tx_desc *desc;
+
+    // 获取 e1000 锁，保证多个线程不会同时访问
+    acquire(&e1000_lock);
+
+    // 获取当前队列的尾部指针
+    tail = regs[E1000_TDT];
+    desc = &tx_ring[tail];
+
+    // 检查环形队列是否溢出
+    if ((desc->status & E1000_TXD_STAT_DD) == 0) {
+        release(&e1000_lock); // 释放锁
+        return -1; // 返回 -1 表示发送失败
+    }
+
+    // 释放之前发送的最后一个 mbuf
+    if (tx_mbufs[tail]) {
+        mbuffree(tx_mbufs[tail]);
+    }
+
+    // 填充描述符
+    desc->addr = (uint64) m->head; // 设置内存地址，表示待发送数据的起始地址
+    desc->length = m->len; // 设置数据长度
+    desc->cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS; // 设置命令标志，表示发送完毕和报告状态
+
+    tx_mbufs[tail] = m; // 存储待发送的 mbuf，以便在发送完成后释放
+
+    // 确保指令不会被重新排序的内存屏障
+    __sync_synchronize();
+
+    // 更新队列的尾部指针，将其循环递增，以支持环形队列
+    regs[E1000_TDT] = (tail + 1) % TX_RING_SIZE;
+
+    release(&e1000_lock); // 释放锁
+
+    return 0; // 返回 0 表示发送成功
 }
 
-static void
-e1000_recv(void)
+
+
+// 接收处理来自 e1000 的数据包
+static void e1000_recv(void)
 {
-  //
-  // Your code here.
-  //
-  // Check for packets that have arrived from the e1000
-  // Create and deliver an mbuf for each packet (using net_rx()).
-  //
+    int tail = (regs[E1000_RDT] + 1) % RX_RING_SIZE; // 计算接收队列尾部指针
+    struct rx_desc *desc = &rx_ring[tail]; // 获取尾部描述符
+
+    // 循环处理已到达的数据包
+    while ((desc->status & E1000_RXD_STAT_DD)) {
+        if (desc->length > MBUF_SIZE) {
+            panic("e1000 len"); // 数据包长度超过最大限制，触发 panic
+        }
+
+        // 更新描述符中报告的数据包长度
+        rx_mbufs[tail]->len = desc->length;
+
+        // 将 mbuf 传递给网络栈处理
+        net_rx(rx_mbufs[tail]);
+
+        // 为下一个数据包分配新的 mbuf，以替代之前传递给 net_rx() 的 mbuf
+        rx_mbufs[tail] = mbufalloc(0);
+        if (!rx_mbufs[tail]) {
+            panic("e1000 no mbufs"); // 无法分配新的 mbuf，触发 panic
+        }
+
+        // 更新描述符的地址和状态
+        desc->addr = (uint64)rx_mbufs[tail]->head;
+        desc->status = 0;
+
+        // 更新尾部指针和描述符，继续处理下一个数据包
+        tail = (tail + 1) % RX_RING_SIZE;
+        desc = &rx_ring[tail];
+    }
+
+    // 更新接收队列尾部指针
+    regs[E1000_RDT] = (tail - 1) % RX_RING_SIZE;
 }
+
+
 
 void
 e1000_intr(void)
