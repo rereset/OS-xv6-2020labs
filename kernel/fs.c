@@ -374,38 +374,99 @@ iunlockput(struct inode *ip)
 
 // Return the disk block address of the nth block in inode ip.
 // If there is no such block, bmap allocates one.
+// kernel/fs.c
+
+// Return the disk block address of the nth block in inode ip.
+// If there is no such block, bmap allocates one.
 static uint
 bmap(struct inode *ip, uint bn)
 {
   uint addr, *a;
   struct buf *bp;
 
+  // 如果逻辑块号在直接块范围内
   if(bn < NDIRECT){
+    // 检查inode的直接块数组中是否已经有了对应逻辑块号的物理块地址
     if((addr = ip->addrs[bn]) == 0)
+      // 如果没有，则分配一个新的物理块并更新inode的直接块数组
       ip->addrs[bn] = addr = balloc(ip->dev);
     return addr;
   }
+  // 减去直接块的数量，以便在间接块范围内计算
   bn -= NDIRECT;
 
+  // 如果逻辑块号在单级间接块范围内
   if(bn < NINDIRECT){
-    // Load indirect block, allocating if necessary.
+    // 检查inode的单级间接块地址是否存在
     if((addr = ip->addrs[NDIRECT]) == 0)
+      // 如果不存在，则分配一个新的物理块作为单级间接块，并更新inode
       ip->addrs[NDIRECT] = addr = balloc(ip->dev);
+    
+    // 读取单级间接块
     bp = bread(ip->dev, addr);
     a = (uint*)bp->data;
+    
+    // 检查单级间接块中是否已经有了对应逻辑块号的物理块地址
     if((addr = a[bn]) == 0){
+      // 如果没有，则分配一个新的物理块并更新单级间接块
       a[bn] = addr = balloc(ip->dev);
+      // 写入日志，记录间接块的更改
       log_write(bp);
     }
+    // 释放缓冲区
     brelse(bp);
     return addr;
   }
+  // 减去单级间接块的数量，以便在双级间接块范围内计算
+  bn -= NINDIRECT;
 
-  panic("bmap: out of range");
+  // 如果逻辑块号在双级间接块范围内
+  if(bn < NINDIRECT * NINDIRECT) {
+    // 检查inode的双级间接块地址是否存在
+    if((addr = ip->addrs[NDIRECT+1]) == 0)
+      // 如果不存在，则分配一个新的物理块作为双级间接块，并更新inode
+      ip->addrs[NDIRECT+1] = addr = balloc(ip->dev);
+    
+    // 读取双级间接块的一级间接块
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+
+    // 计算在一级间接块中的索引，以及在二级间接块中的索引
+    uint first_level_index = bn / NINDIRECT;
+    uint second_level_index = bn % NINDIRECT;
+
+    // 检查一级间接块中是否已经有了对应逻辑块号的物理块地址
+    if((addr = a[first_level_index]) == 0){
+      // 如果没有，则分配一个新的物理块作为一级间接块，并更新一级间接块
+      a[first_level_index] = addr = balloc(ip->dev);
+      // 写入日志，记录一级间接块的更改
+      log_write(bp);
+    }
+    // 释放一级间接块的缓冲区
+    brelse(bp);
+
+    // 读取二级间接块
+    bp = bread(ip->dev, addr);
+    a = (uint*)bp->data;
+
+    // 检查二级间接块中是否已经有了对应逻辑块号的物理块地址
+    if((addr = a[second_level_index]) == 0){
+      // 如果没有，则分配一个新的物理块并更新二级间接块
+      a[second_level_index] = addr = balloc(ip->dev);
+      // 写入日志，记录二级间接块的更改
+      log_write(bp);
+    }
+    // 释放二级间接块的缓冲区
+    brelse(bp);
+    return addr;
+  }
+  // 超出支持的范围，报错
+  panic("bmap: 超出范围");
 }
 
-// Truncate inode (discard contents).
-// Caller must hold ip->lock.
+
+// 截断inode（丢弃内容）。
+// 调用者必须持有ip->lock。
 void
 itrunc(struct inode *ip)
 {
@@ -413,28 +474,55 @@ itrunc(struct inode *ip)
   struct buf *bp;
   uint *a;
 
+  // 释放直接块
   for(i = 0; i < NDIRECT; i++){
     if(ip->addrs[i]){
-      bfree(ip->dev, ip->addrs[i]);
+      bfree(ip->dev, ip->addrs[i]); // 释放直接块
       ip->addrs[i] = 0;
     }
   }
 
+  // 释放单级间接块
   if(ip->addrs[NDIRECT]){
     bp = bread(ip->dev, ip->addrs[NDIRECT]);
     a = (uint*)bp->data;
     for(j = 0; j < NINDIRECT; j++){
       if(a[j])
-        bfree(ip->dev, a[j]);
+        bfree(ip->dev, a[j]); // 释放单间接块
     }
     brelse(bp);
     bfree(ip->dev, ip->addrs[NDIRECT]);
     ip->addrs[NDIRECT] = 0;
   }
 
+  // 释放双级间接块
+  if(ip->addrs[NDIRECT+1]){
+    bp = bread(ip->dev, ip->addrs[NDIRECT+1]);
+    a = (uint*)bp->data;
+    for(j = 0; j < NINDIRECT; j++){
+      if(a[j]) {
+        struct buf *bp2 = bread(ip->dev, a[j]);
+        uint *a2 = (uint*)bp2->data;
+        for(int k = 0; k < NINDIRECT; k++){
+          if(a2[k])
+            bfree(ip->dev, a2[k]); // 释放双间接块中的单间接块
+        }
+        brelse(bp2);
+        bfree(ip->dev, a[j]);
+      }
+    }
+    brelse(bp);
+    bfree(ip->dev, ip->addrs[NDIRECT+1]);
+    ip->addrs[NDIRECT+1] = 0;
+  }
+
+  // 将inode的大小设置为0，表示文件为空
   ip->size = 0;
+  // 更新inode的元数据
   iupdate(ip);
 }
+
+
 
 // Copy stat information from inode.
 // Caller must hold ip->lock.

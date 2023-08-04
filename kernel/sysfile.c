@@ -304,15 +304,31 @@ sys_open(void)
       return -1;
     }
   } else {
-    if((ip = namei(path)) == 0){
-      end_op();
-      return -1;
-    }
-    ilock(ip);
-    if(ip->type == T_DIR && omode != O_RDONLY){
-      iunlockput(ip);
-      end_op();
-      return -1;
+    int symlink_depth = 0; // 记录符号链接的层数，初始为0
+    while(1) { // 递归地跟随符号链接
+      if((ip = namei(path)) == 0){
+        end_op();
+        return -1; // 无法解析路径，返回错误
+      }
+      ilock(ip); // 获取 inode 锁
+      if(ip->type == T_SYMLINK && (omode & O_NOFOLLOW) == 0) {
+        // 如果是符号链接并且未设置 O_NOFOLLOW 标志
+        if(++symlink_depth > 10) {
+          // 如果符号链接的层数超过10，可能存在循环
+          iunlockput(ip); // 解锁并释放 inode
+          end_op(); // 结束文件系统操作
+          return -1; // 返回错误，避免可能的循环
+        }
+        if(readi(ip, 0, (uint64)path, 0, MAXPATH) < 0) {
+          // 读取符号链接的内容到 path 中
+          iunlockput(ip); // 解锁并释放 inode
+          end_op(); // 结束文件系统操作
+          return -1; // 读取错误，返回错误
+        }
+        iunlockput(ip); // 解锁并释放 inode
+      } else {
+        break; // 不是符号链接或者设置了 O_NOFOLLOW 标志，跳出循环
+      }
     }
   }
 
@@ -483,4 +499,38 @@ sys_pipe(void)
     return -1;
   }
   return 0;
+}
+
+// kernel/sysfile.c
+
+// 创建符号链接
+uint64
+sys_symlink(void)
+{
+  struct inode *ip; // inode 结构指针，用于表示创建的符号链接
+  char target[MAXPATH], path[MAXPATH]; // 存储目标路径和符号链接路径的字符数组
+
+  // 从用户态获取目标路径和符号链接路径
+  if(argstr(0, target, MAXPATH) < 0 || argstr(1, path, MAXPATH) < 0)
+    return -1;
+
+  begin_op(); // 开始文件系统操作
+
+  // 创建一个新的符号链接文件
+  ip = create(path, T_SYMLINK, 0, 0);
+  if(ip == 0){
+    end_op();
+    return -1;
+  }
+
+  // 将目标路径存储在符号链接的第一个数据块中
+  if(writei(ip, 0, (uint64)target, 0, strlen(target)) < 0) {
+    end_op();
+    return -1;
+  }
+
+  iunlockput(ip); // 解锁并释放 inode
+
+  end_op(); // 结束文件系统操作
+  return 0; // 返回成功标志
 }
