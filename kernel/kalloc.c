@@ -21,12 +21,26 @@ struct run {
 struct {
   struct spinlock lock;
   struct run *freelist;
-} kmem;
+} kmem[NCPU]; // 为每个 CPU 分配独立的 freelist，并用独立的锁保护它。;
+
+/* 每个cpu有自己的锁 */
+char *kmem_lock_names[] = {
+  "kmem_cpu_0",
+  "kmem_cpu_1",
+  "kmem_cpu_2",
+  "kmem_cpu_3",
+  "kmem_cpu_4",
+  "kmem_cpu_5",
+  "kmem_cpu_6",
+  "kmem_cpu_7",
+};
 
 void
 kinit()
 {
-  initlock(&kmem.lock, "kmem");
+  for(int i=0;i<NCPU;i++) { // 初始化所有锁
+    initlock(&kmem[i].lock, kmem_lock_names[i]);
+  }
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -52,31 +66,87 @@ kfree(void *pa)
     panic("kfree");
 
   // Fill with junk to catch dangling refs.
+  // 用垃圾数据填充内存页，以便捕获悬空引用。
+
   memset(pa, 1, PGSIZE);
 
+  // 将物理地址 pa 转换为 run 结构的指针 r。
   r = (struct run*)pa;
 
-  acquire(&kmem.lock);
-  r->next = kmem.freelist;
-  kmem.freelist = r;
-  release(&kmem.lock);
+  // 停用中断（关中断）以确保操作的原子性。
+  push_off();
+
+  // 获取当前 CPU 的 ID。
+  int cpu = cpuid();
+
+  // 获取当前 CPU 对应的内存管理锁。
+  acquire(&kmem[cpu].lock);
+
+  // 将当前释放的 run 结构添加到对应 CPU 的空闲列表中。
+  r->next = kmem[cpu].freelist;
+  kmem[cpu].freelist = r;
+
+  // 释放内存管理锁，允许其他线程或进程进行内存管理操作。
+  release(&kmem[cpu].lock);
+
+  // 恢复中断（开中断）状态。
+  pop_off();
+
 }
 
 // Allocate one 4096-byte page of physical memory.
 // Returns a pointer that the kernel can use.
 // Returns 0 if the memory cannot be allocated.
+// 分配一个物理页给调用者
 void *
 kalloc(void)
 {
   struct run *r;
 
-  acquire(&kmem.lock);
-  r = kmem.freelist;
-  if(r)
-    kmem.freelist = r->next;
-  release(&kmem.lock);
+  // 停用中断（关中断）以确保操作的原子性
+  push_off();
 
-  if(r)
-    memset((char*)r, 5, PGSIZE); // fill with junk
+  // 获取当前 CPU 的 ID
+  int cpu = cpuid();
+
+  // 获取当前 CPU 对应的内存管理锁
+  acquire(&kmem[cpu].lock);
+
+  // 如果当前 CPU 的空闲列表为空，尝试从其他 CPU 偷取空闲页
+  if (!kmem[cpu].freelist) {
+    int steal_left = 64; // 从其他 CPU 窃取 64 页
+    for (int i = 0; i < NCPU; i++) {
+      if (i == cpu) continue; // 不从自己偷取
+      acquire(&kmem[i].lock);
+      struct run *rr = kmem[i].freelist;
+      while (rr && steal_left) {
+        kmem[i].freelist = rr->next;
+        rr->next = kmem[cpu].freelist;
+        kmem[cpu].freelist = rr;
+        rr = kmem[i].freelist;
+        steal_left--;
+      }
+      release(&kmem[i].lock);
+      if (steal_left == 0) break; // 偷取完成
+    }
+  }
+
+  // 从当前 CPU 的空闲列表中取出一个页
+  r = kmem[cpu].freelist;
+  if (r)
+    kmem[cpu].freelist = r->next;
+
+  // 释放当前 CPU 对应的内存管理锁
+  release(&kmem[cpu].lock);
+
+  // 恢复中断（开中断）状态
+  pop_off();
+
+  // 用垃圾数据填充页，以防止悬空引用
+  if (r)
+    memset((char*)r, 5, PGSIZE);
+
+  // 返回分配的物理页指针
   return (void*)r;
 }
+
